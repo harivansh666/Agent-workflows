@@ -1,4 +1,3 @@
-from httpx2 import query
 from typing import Annotated
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -57,16 +56,9 @@ def build_retriver(file_path: str):
 acadmic_retever = build_retriver("academics_handbook.pdf")
 fees_retever = build_retriver("fee_structure.pdf")
 
-
-def build_retriver_fun(file_path):
-
-    loader = PyMuPDF4LLMLoader(file_path, mode="page")
-    documents = loader.load
-
-
 ################ [Step2] State ##################################
 class State(TypedDict):
-    program: str  # can be a bcom, bca
+    program: str  # can be a bcom, bca, bba
     messages: Annotated[list, add_messages]
     query_type: str  # fee| genereal question | acadmic basiclly kis lyi pushna aa
     retrieved_context: str  # jo db vicho lyanda aa
@@ -113,7 +105,7 @@ def acadmic_rag_node(state: State) -> dict:
     docs = acadmic_retever.invoke(query)
     context = "\n \n".join([doc.page_content for doc in docs])
     return {"retrieved_context": context}
-
+    
 
 def fees_node(state: State):
     """Retrieves relevant chunks from the fee handbook"""

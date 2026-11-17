@@ -120,10 +120,30 @@ def reviewer_node(state:State):
 
   is_approved = "APPROVED" in review_text.upper().split("FEEDBACK")[0]
 
+# router function 
+
 def should_use_tool(state:State):
   last_message = state['messages'][-1]
   if getattr(last_message, 'tool_calls', None): # last_message de attributes lvage and agar tools_calls de value hai ta return kr da ge "tools" agar false aa gya nahi hai aa gya ta "extract_draft" return kr do.   
     return "tools"
   return "extract_draft"
 
+def should_stop_looping(state: State):
+  if state['is_approved']:
+    print("post has beed approved")
+    return END
+  elif state['attempts'] >= 3
+    print("reached max attempts")
+    return END
+  return "writer"
+
+# build the graph 
+
+graph = StateGraph(State)
+
+graph.add_node('writer',writer_node)
+graph.add_node('review',reviewer_node)
+graph.add_node('tools',tool_nodes)
+graph.add_node('extract_draft',extract_draft_node)
+graph.add_node('reviewer',reviewer_node)
 

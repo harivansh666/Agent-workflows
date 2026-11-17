@@ -1,43 +1,28 @@
-from numba.core.types import none
-from typing import Annotated
+from dotenv import load_dotenv
+
+load_dotenv()  # imports se pehle, taaki llm.py ko env keys mil jayein
+
+from typing import Annotated, TypedDict
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from langgraph.graph.message import add_messages
 from langgraph.graph import StateGraph, START, END
-from dotenv import load_dotenv
-from langchain_community.vectorstores import FAISS
-from typing import TypedDict
-
 from langgraph.prebuilt import ToolNode
 from langchain_tavily import TavilySearch
-from pymupdf import get_text
 from llm import llm
 
-load_dotenv()
-    
-search_tool = TavilySearch(
-    max_results=5,
-    topic="general",
-    # include_answer=False,
-    # include_raw_content=False,
-    # include_images=False,
-    # include_image_descriptions=False,
-    # search_depth="basic",
-    # time_range="day",
-    # include_domains=None,
-    # exclude_domains=None
-)
-
+search_tool = TavilySearch(max_results=5, topic="general")
 tools = [search_tool]
-
-writer_llm_with_tools = llm.bind_tools(tools) # add krte tools llm naal, Hum LLM ko bata rahe hain ki tumhare paas ye tools available hain.
+writer_llm_with_tools = llm.bind_tools(tools)
 
 
 class State(TypedDict):
-  topic : str
-  messages: Annotated[list, add_messages]
-  draft: str # draft nu review kruga reviewer llm 
-  reviewer_feedback: str # reviewer llm feedback
-  is_approved: bool # reviewer llm feedback approve ya reject
-  attempts: int # number of attempts made to improve the draft
+    topic: str
+    messages: Annotated[list, add_messages]
+    draft: str
+    reviewer_feedback: str
+    is_approved: bool
+    attempts: int
+
 
 WRITER_SYSTEM_PROMPT = (
     "You are an expert LinkedIn content writer. Your job is to write "
@@ -52,40 +37,44 @@ WRITER_SYSTEM_PROMPT = (
     "engagement. Do not use hashtags."
 )
 
-def writer_node(state: State) -> dict:
-    print("\n Writer Node: Generating draft...")
-    
-    attempt = state.get('attempts', 0) + 1
-    topic = state["topic"]
-    previous_feedback = state.get("reviewer_feedback", "")
-    
-    response = writer_llm_with_tools.invoke(WRITER_SYSTEM_PROMPT, state["messages"][-1].content)
-    
-    if attempt == 1:
-      user_message =( f"Write a LinkedIn post about the topic: '{topic}'.",)
-    else:
-      user_message = (
-        f"your prev draf on {topic} was rejected."
-        f"Here is the reviewer's feedback: \n {previous_feedback}"
-        f"Write a new, improved draft that fixes every issue mentiond"
-        f"do not repeat the same mistake"
-      )
-    
-    messages = [("system",WRITER_SYSTEM_PROMPT),("human",user_message)]
-    response = writer_llm_with_tools.invoke(messages)
-    return {
-            "message": [("human", user_message), ("ai", response)], 
-            "attempts": attempt,
-        }
-    
-tool_nodes = ToolNode(tools) 
 
-def extract_draft_node(state: State)->dict:
-  last_message = state['messages'][-1]
-  draft = last_message.content
-  
-  print(f"\n\n generated post \n {draft} \n ")
-  return {"draft": draft}
+def writer_node(state: State) -> dict:
+    print("\nWriter Node: Generating draft...")
+
+    topic = state["topic"]
+    history = state["messages"]
+    new_msgs = []
+
+    if not history:
+        # first attempt
+        new_msgs.append(
+            HumanMessage(f"Write a LinkedIn post about the topic: '{topic}'.")
+        )
+    elif isinstance(history[-1], AIMessage):
+        # previous draft was rejected -> feedback do
+        new_msgs.append(
+            HumanMessage(
+                f"Your previous draft on '{topic}' was rejected.\n"
+                f"Reviewer feedback:\n{state['reviewer_feedback']}\n\n"
+                "Write a new, improved draft that fixes every issue mentioned. "
+                "Do not repeat the same mistakes."
+            )
+        )
+    # else: last message ToolMessage hai -> search results ke saath aage badho
+
+    response = writer_llm_with_tools.invoke(
+        [SystemMessage(WRITER_SYSTEM_PROMPT)] + history + new_msgs
+    )
+    return {"messages": new_msgs + [response]}
+
+
+tool_node = ToolNode(tools)
+
+
+def extract_draft_node(state: State) -> dict:
+    draft = state["messages"][-1].content
+    print(f"\n\nGenerated post:\n{draft}\n")
+    return {"draft": draft}
 
 
 REVIEWER_SYSTEM_PROMPT = (
@@ -105,45 +94,95 @@ REVIEWER_SYSTEM_PROMPT = (
     "criteria. Reject if even one criterion is clearly missing."
 )
 
-def reviewer_node(state:State):
-  """Reviews the draft and decides: approve or reject with feedback."""
-  draft = state["draft"]
-  prompt = (
-      f"review this LinkedIn post draft : \n"
-      f"{draft}\n"
-      f"give your reviews"
-  )
-  
-  response = llm.invoke([("system": REVIEWER_SYSTEM_PROMPT),("human": prompt)])
-  
-  review_text = response.content.strip()
 
-  is_approved = "APPROVED" in review_text.upper().split("FEEDBACK")[0]
+def reviewer_node(state: State) -> dict:
+    prompt = (
+        f"Review this LinkedIn post draft:\n\n{state['draft']}\n\nGive your review."
+    )
+    response = llm.invoke(
+        [
+            ("system", REVIEWER_SYSTEM_PROMPT),
+            ("human", prompt),
+        ]
+    )
 
-# router function 
+    review_text = response.content.strip()
+    verdict_part = review_text.upper().split("FEEDBACK")[0]
+    is_approved = "APPROVED" in verdict_part and "REJECTED" not in verdict_part
 
-def should_use_tool(state:State):
-  last_message = state['messages'][-1]
-  if getattr(last_message, 'tool_calls', None): # last_message de attributes lvage and agar tools_calls de value hai ta return kr da ge "tools" agar false aa gya nahi hai aa gya ta "extract_draft" return kr do.   
-    return "tools"
-  return "extract_draft"
+    print(f"\nReviewer: {'APPROVED' if is_approved else 'REJECTED'}\n{review_text}\n")
+
+    return {
+        "is_approved": is_approved,
+        "reviewer_feedback": review_text,
+        "attempts": state.get("attempts", 0) + 1,
+    }
+
+
+# routers
+def should_use_tool(state: State):
+    last_message = state["messages"][-1]
+    if getattr(last_message, "tool_calls", None):
+        return "tools"
+    return "extract_draft"
+
 
 def should_stop_looping(state: State):
-  if state['is_approved']:
-    print("post has beed approved")
-    return END
-  elif state['attempts'] >= 3
-    print("reached max attempts")
-    return END
-  return "writer"
+    if state["is_approved"]:
+        print("Post has been approved")
+        return END
+    if state["attempts"] >= 3:
+        print("Reached max attempts")
+        return END
+    return "writer"
 
-# build the graph 
 
+# build graph
 graph = StateGraph(State)
 
-graph.add_node('writer',writer_node)
-graph.add_node('review',reviewer_node)
-graph.add_node('tools',tool_nodes)
-graph.add_node('extract_draft',extract_draft_node)
-graph.add_node('reviewer',reviewer_node)
+graph.add_node("writer", writer_node)
+graph.add_node("tools", tool_node)
+graph.add_node("extract_draft", extract_draft_node)
+graph.add_node("reviewer", reviewer_node)
 
+graph.add_edge(START, "writer")
+graph.add_conditional_edges("writer", should_use_tool, ["tools", "extract_draft"])
+graph.add_edge("tools", "writer")  # search ke baad wapas writer
+graph.add_edge("extract_draft", "reviewer")
+graph.add_conditional_edges("reviewer", should_stop_looping, ["writer", END])
+
+app = graph.compile()
+
+
+print("=" * 55)
+print("Welcome to the LinkedIn Post Generator")
+print("=" * 55)
+print("\nThis tool will draft a LinkedIn post for you, review it")
+print("itself, and iterate until it's publish-ready.")
+print("=" * 55)
+
+topic = input("\nWhat topic do you want a LinkedIn post about?\n> ").strip()
+
+if not topic:
+    print("\nNo topic given. Exiting.")
+else:
+    print("\nStarting generation...\n")
+
+    initial_state = {
+        "topic": topic,
+        "messages": [],
+        "draft": "",
+        "reviewer_feedback": "",
+        "is_approved": False,
+        "attempts": 0,
+    }
+
+    final_state = app.invoke(initial_state)
+
+    print("\n" + "=" * 55)
+    print("FINAL LINKEDIN POST")
+    print("=" * 55)
+    print(final_state["draft"])
+    print("=" * 55)
+    print(f"Total attempts: {final_state['attempts']}")
+    print(f"Approved: {final_state['is_approved']}")

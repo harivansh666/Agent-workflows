@@ -10,6 +10,26 @@ from langgraph.prebuilt import ToolNode
 from langchain_tavily import TavilySearch
 from llm import llm
 
+
+def _extract_text(content) -> str:
+    """Safely extract plain text from an LLM response or message content field,
+    which may be a str or a list of content-block dicts."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict) and "text" in part:
+                parts.append(part["text"])
+            elif hasattr(part, "text"):
+                parts.append(getattr(part, "text"))
+            else:
+                parts.append(str(part))
+        return "".join(parts)
+    return str(content)
+
 search_tool = TavilySearch(max_results=5, topic="general")
 tools = [search_tool]
 writer_llm_with_tools = llm.bind_tools(tools)
@@ -72,7 +92,7 @@ tool_node = ToolNode(tools)
 
 
 def extract_draft_node(state: State) -> dict:
-    draft = state["messages"][-1].content
+    draft = _extract_text(state["messages"][-1].content)
     print(f"\n\nGenerated post:\n{draft}\n")
     return {"draft": draft}
 
@@ -106,7 +126,7 @@ def reviewer_node(state: State) -> dict:
         ]
     )
 
-    review_text = response.content.strip()
+    review_text = _extract_text(response.content).strip()
     verdict_part = review_text.upper().split("FEEDBACK")[0]
     is_approved = "APPROVED" in verdict_part and "REJECTED" not in verdict_part
 
